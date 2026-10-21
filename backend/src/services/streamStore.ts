@@ -946,32 +946,40 @@ export async function estimateCreateStreamFee(input: StreamInput): Promise<Strea
 export function refreshStreamStatuses(): number {
   const db = getDb();
   const now = nowInSeconds();
+  const completedStreams: StreamRecord[] = [];
+  let completedCount = 0;
 
-  const toComplete = db.prepare(`
-    SELECT * FROM streams 
-    WHERE canceled_at IS NULL AND completed_at IS NULL AND paused_at IS NULL
-      AND (start_at + duration_seconds) <= ?
-  `).all() as StreamRow[];
+  db.transaction(() => {
+    const toComplete = db.prepare(`
+      SELECT * FROM streams
+      WHERE canceled_at IS NULL AND completed_at IS NULL AND paused_at IS NULL
+        AND (start_at + duration_seconds) <= ?
+    `).all(now) as StreamRow[];
 
-  const result = db.prepare(`
-    UPDATE streams SET completed_at = ?
-    WHERE canceled_at IS NULL AND completed_at IS NULL AND paused_at IS NULL
-      AND (start_at + duration_seconds) <= ?
-  `).run(now, now);
+    const result = db.prepare(`
+      UPDATE streams SET completed_at = ?
+      WHERE canceled_at IS NULL AND completed_at IS NULL AND paused_at IS NULL
+        AND (start_at + duration_seconds) <= ?
+    `).run(now, now);
+    completedCount = result.changes;
 
-  toComplete.forEach(row => {
-    const record = rowToRecord(row);
+    for (const row of toComplete) {
+      const record = rowToRecord(row);
+      record.completedAt = now;
 
-    record.completedAt = now;
+      if (!streamHasEvent(record.id, "completed")) {
+        recordEventWithDb(db, record.id, "completed", now);
+      }
 
-    if (!streamHasEvent(record.id, "completed")) {
-      recordEventWithDb(db, record.id, "completed", now);
+      completedStreams.push(record);
     }
+  })();
 
-    triggerWebhook("completed", record);
-  });
+  for (const stream of completedStreams) {
+    triggerWebhook("completed", stream);
+  }
 
-  return result.changes;
+  return completedCount;
 }
 
 export async function archiveOldStreams(): Promise<number> {
